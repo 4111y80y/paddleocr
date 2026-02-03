@@ -581,11 +581,17 @@ class OCREngine:
 
         try:
             # Use cached PP-StructureV3 engine or create new one
-            # Use format_block_content=True to get automatic Markdown formatting
+            # Disable unused modules to speed up loading
             if self._structure_engine is None:
                 self._structure_engine = PPStructureV3(
                     lang=self._lang,
-                    format_block_content=True  # Enable Markdown output
+                    format_block_content=True,  # Enable Markdown output
+                    # Disable rarely used modules to reduce loading time
+                    use_formula_recognition=False,  # Disable formula/LaTeX
+                    use_seal_recognition=False,     # Disable seal detection
+                    use_chart_recognition=False,    # Disable chart recognition
+                    use_doc_orientation_classify=False,  # Disable orientation fix
+                    use_doc_unwarping=False,        # Disable unwarping
                 )
 
             # Run prediction - pass image path directly if available
