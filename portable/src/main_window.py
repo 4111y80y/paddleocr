@@ -1389,10 +1389,39 @@ class SettingsDialog(QDialog):
     def setup_ui(self):
         """Setup dialog UI."""
         self.setWindowTitle("设置")
-        self.setMinimumSize(450, 400)
-        self.resize(520, 620)
+        self.setMinimumSize(500, 700)
+        self.resize(520, 750)
 
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(8)
+
+        # Create scroll area for settings content
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background-color: #2d2d2d;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #555555;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #666666;
+            }
+        """)
+
+        # Content widget inside scroll area
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(16)
 
         # Hotkey Section
@@ -1541,7 +1570,11 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
 
-        # Buttons
+        # Set scroll area content
+        scroll_area.setWidget(content_widget)
+        main_layout.addWidget(scroll_area)
+
+        # Buttons (outside scroll area)
         button_layout = QHBoxLayout()
 
         self.reset_btn = QPushButton("恢复默认设置")
@@ -1558,7 +1591,7 @@ class SettingsDialog(QDialog):
         self.save_btn.clicked.connect(self.save_settings)
         button_layout.addWidget(self.save_btn)
 
-        layout.addLayout(button_layout)
+        main_layout.addLayout(button_layout)
 
     def _get_toggle_style(self):
         """Get stylesheet for toggle buttons."""
