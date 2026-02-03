@@ -626,9 +626,14 @@ class OCREngine:
                 # Try to get markdown from page_result
                 page_markdown = ''
                 if hasattr(page_result, 'markdown'):
-                    page_markdown = page_result.markdown or ''
+                    md_val = page_result.markdown
+                    # Convert MarkdownResult or other objects to string
+                    if md_val is not None:
+                        page_markdown = str(md_val) if not isinstance(md_val, str) else md_val
                 elif isinstance(page_result, dict) and 'markdown' in page_result:
-                    page_markdown = page_result.get('markdown', '')
+                    md_val = page_result.get('markdown', '')
+                    if md_val is not None:
+                        page_markdown = str(md_val) if not isinstance(md_val, str) else md_val
 
                 if page_markdown:
                     markdown_pages.append(page_markdown)
@@ -675,9 +680,11 @@ class OCREngine:
             # Try to concatenate markdown pages if PPStructureV3 provides the method
             if markdown_pages:
                 try:
-                    result['markdown'] = self._structure_engine.concatenate_markdown_pages(markdown_pages)
+                    md_result = self._structure_engine.concatenate_markdown_pages(markdown_pages)
+                    # Ensure result is string
+                    result['markdown'] = str(md_result) if not isinstance(md_result, str) else md_result
                 except Exception:
-                    result['markdown'] = '\n\n'.join(markdown_pages)
+                    result['markdown'] = '\n\n'.join(str(p) for p in markdown_pages)
             else:
                 # Fallback: build markdown from extracted text
                 result['markdown'] = '\n'.join(all_texts) if all_texts else ''
