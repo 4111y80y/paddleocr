@@ -57,6 +57,7 @@ class OCREngine:
         self._initialized = False
         self._ocr_version = None
         self._vl_pipeline = None  # For PaddleOCR-VL-1.5
+        self._structure_engine = None  # For PP-StructureV3 (cached)
 
         # Lazy initialization - don't load heavy modules until needed
 
@@ -538,6 +539,8 @@ class OCREngine:
             except Exception:
                 pass
             self._vl_pipeline = None
+        if self._structure_engine is not None:
+            self._structure_engine = None
         self._ocr = None
         self._initialized = False
 
@@ -577,11 +580,9 @@ class OCREngine:
             img_path = None
 
         try:
-            # Initialize PP-StructureV3 pipeline
-            # Use CPU for structure analysis to avoid GPU memory issues
-            table_engine = PPStructureV3(
-                lang=self._lang
-            )
+            # Use cached PP-StructureV3 engine or create new one
+            if self._structure_engine is None:
+                self._structure_engine = PPStructureV3(lang=self._lang)
 
             # Run prediction
             if img_path is not None:
@@ -594,34 +595,71 @@ class OCREngine:
                 img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
             # Use predict() method for PPStructureV3 (PaddleOCR 3.x API)
-            output = table_engine.predict(img)
+            output = self._structure_engine.predict(img)
 
             # Extract results
             result = {
                 'markdown': '',
-                'json': output,
+                'json': [],
                 'text': ''
             }
 
-            # Convert output to markdown-like format
+            # Parse PP-StructureV3 output format
+            # output is a generator/list of prediction results
+            all_regions = []
             markdown_lines = []
-            for region in output:
-                if isinstance(region, dict):
-                    region_type = region.get('type', 'text')
-                    region_text = region.get('res', '')
-                    if isinstance(region_text, list):
-                        # Extract text from list of text items
-                        texts = []
-                        for item in region_text:
-                            if isinstance(item, dict) and 'text' in item:
-                                texts.append(item['text'])
-                            elif isinstance(item, (list, tuple)) and len(item) > 1:
-                                texts.append(str(item[1]))
-                        region_text = ' '.join(texts)
-                    markdown_lines.append(f"## {region_type}\n{region_text}\n")
 
-            result['markdown'] = '\n'.join(markdown_lines)
-            result['text'] = self._extract_text_from_structure(output)
+            for page_result in output:
+                # Each page_result may have different structure
+                if hasattr(page_result, '__iter__') and not isinstance(page_result, (str, dict)):
+                    # It's iterable (like a list)
+                    for item in page_result:
+                        all_regions.append(item)
+                elif isinstance(page_result, dict):
+                    all_regions.append(page_result)
+                else:
+                    # Try to access as object attributes
+                    if hasattr(page_result, 'keys'):
+                        all_regions.append(dict(page_result))
+
+            # Process each region
+            for region in all_regions:
+                if isinstance(region, dict):
+                    region_type = region.get('type', region.get('label', 'text'))
+
+                    # Try different keys for text content
+                    region_text = ''
+                    for key in ['text', 'rec_texts', 'res', 'content']:
+                        if key in region:
+                            val = region[key]
+                            if isinstance(val, str):
+                                region_text = val
+                                break
+                            elif isinstance(val, list):
+                                # Join list of texts
+                                text_parts = []
+                                for item in val:
+                                    if isinstance(item, str):
+                                        text_parts.append(item)
+                                    elif isinstance(item, dict) and 'text' in item:
+                                        text_parts.append(item['text'])
+                                region_text = ' '.join(text_parts)
+                                break
+
+                    if region_text:
+                        # Format based on region type
+                        if region_type in ['title', 'header']:
+                            markdown_lines.append(f"# {region_text}\n")
+                        elif region_type in ['table']:
+                            markdown_lines.append(f"[Table]\n{region_text}\n")
+                        elif region_type in ['figure', 'image']:
+                            markdown_lines.append(f"[Figure]\n")
+                        else:
+                            markdown_lines.append(f"{region_text}\n")
+
+            result['json'] = all_regions
+            result['markdown'] = '\n'.join(markdown_lines) if markdown_lines else ''
+            result['text'] = self._extract_text_from_structure(all_regions)
 
             return result
 
