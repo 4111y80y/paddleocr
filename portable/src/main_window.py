@@ -1389,8 +1389,7 @@ class SettingsDialog(QDialog):
     def setup_ui(self):
         """Setup dialog UI."""
         self.setWindowTitle("设置")
-        self.setMinimumSize(500, 700)
-        self.resize(520, 750)
+        self.setFixedSize(520, 900)
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(8)
