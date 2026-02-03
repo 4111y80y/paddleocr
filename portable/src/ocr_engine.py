@@ -3,32 +3,60 @@
 """
 ScreenOCR - OCR Engine Wrapper
 Encapsulates PaddleOCR functionality with device selection support.
+Supports PaddleOCR 3.0 + PP-OCRv5
 """
 
 import os
 import sys
 from typing import List, Tuple, Optional, Any
 
+# 注意: os.environ 对 PaddlePaddle 3.x 无效
+# 必须在 import paddle 之后使用 paddle.set_flags() 设置
+# 见 _ensure_initialized() 方法中的 _setup_paddle_flags() 调用
+
+
+def _setup_paddle_flags():
+    """Setup PaddlePaddle flags to disable oneDNN and PIR.
+
+    CRITICAL: Must be called AFTER 'import paddle' but BEFORE using any paddle features.
+    os.environ is ineffective for PaddlePaddle 3.x, must use paddle.set_flags().
+    Reference: https://github.com/PaddlePaddle/Paddle/issues/77340
+    """
+    try:
+        import paddle
+        # Disable PIR and oneDNN to avoid ConvertPirAttribute2RuntimeAttribute error
+        paddle.set_flags({
+            'FLAGS_enable_pir_api': 0,
+            'FLAGS_use_mkldnn': 0,
+        })
+    except Exception:
+        pass  # Ignore errors, will be handled elsewhere
+
 
 class OCREngine:
     """
     OCR Engine wrapper for PaddleOCR.
     Supports CPU and multi-GPU device selection.
+    Compatible with PaddleOCR 3.0 + PP-OCRv5
     """
 
-    def __init__(self, device_id: str = "cpu", lang: str = "ch"):
+    def __init__(self, device_id: str = "cpu", lang: str = "ch", model_type: str = "pp-ocrv5"):
         """
         Initialize OCR engine.
 
         Args:
             device_id: Device identifier ("cpu", "gpu:0", "gpu:1", etc.)
             lang: OCR language ("ch", "en", "cht", "japan", "korean", etc.)
+            model_type: OCR model type ("pp-ocrv5", "paddleocr-vl")
         """
         self._device_id = device_id
         self._lang = lang
+        self._model_type = model_type
         self._ocr = None
         self._paddle = None
         self._initialized = False
+        self._ocr_version = None
+        self._vl_pipeline = None  # For PaddleOCR-VL-1.5
 
         # Lazy initialization - don't load heavy modules until needed
 
@@ -39,20 +67,51 @@ class OCREngine:
 
         try:
             import paddle
+            # Setup flags immediately after import, before any paddle operations
+            _setup_paddle_flags()
             self._paddle = paddle
 
             # Set device
             paddle.set_device(self._device_id)
 
-            # Import and initialize PaddleOCR
-            from paddleocr import PaddleOCR
+            # Check if using VL model
+            if self._model_type == 'paddleocr-vl':
+                self._init_vl_model()
+            else:
+                self._init_ppocr_model()
 
-            use_gpu = self._device_id.startswith("gpu")
-            gpu_id = 0
-            if use_gpu and ":" in self._device_id:
-                gpu_id = int(self._device_id.split(":")[1])
+            self._initialized = True
 
-            # PaddleOCR 2.7.x API
+        except ImportError as e:
+            raise RuntimeError(
+                f"Failed to import PaddleOCR. "
+                f"Please install: pip install paddlepaddle-gpu paddleocr\n"
+                f"Error: {e}"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize OCR engine: {e}")
+
+    def _init_ppocr_model(self):
+        """Initialize PP-OCRv5 model."""
+        from paddleocr import PaddleOCR
+
+        # Detect PaddleOCR version
+        import paddleocr as paddleocr_module
+        self._ocr_version = getattr(paddleocr_module, '__version__', '2.x')
+
+        use_gpu = self._device_id.startswith("gpu")
+        gpu_id = 0
+        if use_gpu and ":" in self._device_id:
+            gpu_id = int(self._device_id.split(":")[1])
+
+        # Check if PaddleOCR 3.0+ (PP-OCRv5)
+        if self._is_version_3_or_higher():
+            # PaddleOCR 3.0+ API - uses PP-OCRv5 model by default
+            # Note: use_gpu and show_log parameters removed in 3.0+
+            # device is set via paddle.set_device()
+            self._ocr = PaddleOCR(lang=self._lang)
+        else:
+            # PaddleOCR 2.x API (backward compatibility)
             self._ocr = PaddleOCR(
                 use_angle_cls=True,
                 lang=self._lang,
@@ -61,16 +120,37 @@ class OCREngine:
                 show_log=False
             )
 
-            self._initialized = True
-
-        except ImportError as e:
+    def _init_vl_model(self):
+        """Initialize PaddleOCR-VL-1.5 vision-language model."""
+        try:
+            from paddleocr import PaddleOCRVL
+        except ImportError:
             raise RuntimeError(
-                f"Failed to import PaddleOCR. "
-                f"Please install: pip install paddlepaddle paddleocr\n"
-                f"Error: {e}"
+                "PaddleOCR-VL-1.5 not available. "
+                "Please install PaddleOCR 3.0+: pip install 'paddleocr>=3.0'"
             )
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize OCR engine: {e}")
+
+        use_gpu = self._device_id.startswith("gpu")
+
+        # Initialize VL model with 0.9B parameters
+        self._vl_pipeline = PaddleOCRVL(
+            use_gpu=use_gpu,
+            device=self._device_id if use_gpu else "cpu",
+            lang=self._lang,
+            show_log=False
+        )
+        self._ocr_version = "3.0-vl"
+
+    def _is_version_3_or_higher(self) -> bool:
+        """Check if PaddleOCR version is 3.0 or higher."""
+        if self._ocr_version is None:
+            return False
+        try:
+            version_parts = str(self._ocr_version).split('.')
+            major_version = int(version_parts[0])
+            return major_version >= 3
+        except (ValueError, IndexError):
+            return False
 
     def get_available_devices(self) -> List[Tuple[str, str]]:
         """
@@ -124,6 +204,21 @@ class OCREngine:
             # Force re-initialization on next use
             self._initialized = False
             self._ocr = None
+            self._vl_pipeline = None
+
+    def set_model_type(self, model_type: str):
+        """
+        Set the OCR model type.
+
+        Args:
+            model_type: Model type ("pp-ocrv5", "paddleocr-vl")
+        """
+        if model_type != self._model_type:
+            self._model_type = model_type
+            # Force re-initialization on next use
+            self._initialized = False
+            self._ocr = None
+            self._vl_pipeline = None
 
     def get_current_device_name(self) -> str:
         """Get the display name of current device."""
@@ -170,15 +265,78 @@ class OCREngine:
             # Assume numpy array
             img = image_input
 
-        # Run OCR using the new predict API
-        try:
-            result = self._ocr.predict(img)
-        except AttributeError:
-            # Fallback to old API
+        # Use VL model if selected
+        if self._model_type == 'paddleocr-vl' and self._vl_pipeline is not None:
+            return self._recognize_vl(img)
+
+        # Run OCR using the appropriate API
+        if self._is_version_3_or_higher():
+            # PaddleOCR 3.0+ uses predict() method
+            try:
+                result = self._ocr.predict(img)
+            except Exception:
+                # Fallback to ocr() if predict fails
+                result = self._ocr.ocr(img, cls=True)
+        else:
+            # PaddleOCR 2.x uses ocr() method
             result = self._ocr.ocr(img, cls=True)
 
         # Extract text from result
         return self._extract_text(result)
+
+    def _recognize_vl(self, image_input: Any) -> str:
+        """
+        Perform OCR using PaddleOCR-VL-1.5 vision-language model.
+
+        Args:
+            image_input: Image path (str), PIL Image, or numpy array.
+
+        Returns:
+            Recognized text as a single string.
+        """
+        # Convert input to path if needed
+        temp_path = None
+        if isinstance(image_input, str):
+            if not os.path.exists(image_input):
+                raise FileNotFoundError(f"Image not found: {image_input}")
+            img_path = image_input
+        elif hasattr(image_input, 'convert'):
+            # PIL Image - save to temp file
+            import tempfile
+            temp_path = tempfile.mktemp(suffix='.png')
+            image_input.save(temp_path, 'PNG')
+            img_path = temp_path
+        else:
+            # Assume numpy array - save to temp file
+            import tempfile
+            from PIL import Image
+            temp_path = tempfile.mktemp(suffix='.png')
+            Image.fromarray(image_input).save(temp_path, 'PNG')
+            img_path = temp_path
+
+        try:
+            # Run VL model prediction
+            result = self._vl_pipeline.predict(img_path)
+
+            # Extract text from VL result
+            texts = []
+            for res in result:
+                if hasattr(res, 'text') and res.text:
+                    texts.append(str(res.text))
+                elif isinstance(res, dict):
+                    text = res.get('text', '')
+                    if text:
+                        texts.append(str(text))
+
+            return '\n'.join(texts)
+
+        finally:
+            # Cleanup temp file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
 
     def recognize_with_confidence(self, image_input: Any) -> List[Tuple[str, float]]:
         """
@@ -192,6 +350,12 @@ class OCREngine:
         """
         self._ensure_initialized()
 
+        # Use VL model if selected (VL model returns text without confidence)
+        if self._model_type == 'paddleocr-vl' and self._vl_pipeline is not None:
+            text = self._recognize_vl(image_input)
+            # VL model doesn't provide confidence, return 1.0 for each line
+            return [(line, 1.0) for line in text.split('\n') if line.strip()]
+
         # Convert input
         if isinstance(image_input, str):
             if not os.path.exists(image_input):
@@ -203,10 +367,16 @@ class OCREngine:
         else:
             img = image_input
 
-        # Run OCR
-        try:
-            result = self._ocr.predict(img)
-        except AttributeError:
+        # Run OCR using the appropriate API
+        if self._is_version_3_or_higher():
+            # PaddleOCR 3.0+ uses predict() method
+            try:
+                result = self._ocr.predict(img)
+            except Exception:
+                # Fallback to ocr() if predict fails
+                result = self._ocr.ocr(img, cls=True)
+        else:
+            # PaddleOCR 2.x uses ocr() method
             result = self._ocr.ocr(img, cls=True)
 
         return self._extract_with_confidence(result)
@@ -312,10 +482,16 @@ class OCREngine:
         else:
             img = image_input
 
-        # Run OCR
-        try:
-            result = self._ocr.predict(img)
-        except AttributeError:
+        # Run OCR using the appropriate API
+        if self._is_version_3_or_higher():
+            # PaddleOCR 3.0+ uses predict() method
+            try:
+                result = self._ocr.predict(img)
+            except Exception:
+                # Fallback to ocr() if predict fails
+                result = self._ocr.ocr(img, cls=True)
+        else:
+            # PaddleOCR 2.x uses ocr() method
             result = self._ocr.ocr(img, cls=True)
 
         return self._extract_with_boxes(result)
@@ -355,5 +531,180 @@ class OCREngine:
 
     def cleanup(self):
         """Cleanup resources."""
+        if self._vl_pipeline is not None:
+            try:
+                if hasattr(self._vl_pipeline, 'close'):
+                    self._vl_pipeline.close()
+            except Exception:
+                pass
+            self._vl_pipeline = None
         self._ocr = None
         self._initialized = False
+
+    def recognize_document(self, image_input: Any) -> dict:
+        """
+        Perform document structure analysis using PP-StructureV3.
+        Returns markdown and JSON format output.
+
+        Args:
+            image_input: Image path (str), PIL Image, or numpy array.
+
+        Returns:
+            Dictionary with 'markdown', 'json', and 'text' keys.
+        """
+        try:
+            from paddleocr import PPStructureV3
+        except ImportError:
+            raise RuntimeError(
+                "PP-StructureV3 not available. "
+                "Please install PaddleOCR: pip install 'paddleocr>=3.0' paddlex"
+            )
+
+        # Convert input to path or array
+        temp_path = None
+        if isinstance(image_input, str):
+            if not os.path.exists(image_input):
+                raise FileNotFoundError(f"Image not found: {image_input}")
+            img_path = image_input
+        elif hasattr(image_input, 'convert'):
+            # PIL Image - convert to numpy array
+            import numpy as np
+            img_array = np.array(image_input.convert('RGB'))
+            img_path = None
+        else:
+            # Assume numpy array
+            img_array = image_input
+            img_path = None
+
+        try:
+            # Initialize PP-StructureV3 pipeline
+            # Use CPU for structure analysis to avoid GPU memory issues
+            table_engine = PPStructureV3(
+                lang=self._lang
+            )
+
+            # Run prediction
+            if img_path is not None:
+                # Use cv2 to read image
+                import cv2
+                img = cv2.imread(img_path)
+            else:
+                import cv2
+                # Convert RGB to BGR for OpenCV
+                img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+            # Use predict() method for PPStructureV3 (PaddleOCR 3.x API)
+            output = table_engine.predict(img)
+
+            # Extract results
+            result = {
+                'markdown': '',
+                'json': output,
+                'text': ''
+            }
+
+            # Convert output to markdown-like format
+            markdown_lines = []
+            for region in output:
+                if isinstance(region, dict):
+                    region_type = region.get('type', 'text')
+                    region_text = region.get('res', '')
+                    if isinstance(region_text, list):
+                        # Extract text from list of text items
+                        texts = []
+                        for item in region_text:
+                            if isinstance(item, dict) and 'text' in item:
+                                texts.append(item['text'])
+                            elif isinstance(item, (list, tuple)) and len(item) > 1:
+                                texts.append(str(item[1]))
+                        region_text = ' '.join(texts)
+                    markdown_lines.append(f"## {region_type}\n{region_text}\n")
+
+            result['markdown'] = '\n'.join(markdown_lines)
+            result['text'] = self._extract_text_from_structure(output)
+
+            return result
+
+        finally:
+            # Cleanup temp file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+    def _extract_text_from_structure(self, json_data: Any) -> str:
+        """Extract plain text from structure JSON data."""
+        texts = []
+
+        # Safe check for empty/None data (avoid NumPy array truth value error)
+        if json_data is None:
+            return ''
+
+        # Check for numpy array
+        if hasattr(json_data, 'ndim'):
+            # This is a numpy array, skip it
+            return ''
+
+        # Handle different JSON structures
+        if isinstance(json_data, list):
+            for item in json_data:
+                texts.append(self._extract_text_from_structure(item))
+        elif isinstance(json_data, dict):
+            # Try common text fields
+            for key in ['text', 'content', 'ocr_text', 'rec_texts']:
+                if key in json_data:
+                    value = json_data[key]
+                    if isinstance(value, list):
+                        texts.extend([str(t) for t in value])
+                    elif isinstance(value, str):
+                        texts.append(value)
+
+            # Recursively process nested structures
+            for key, value in json_data.items():
+                if isinstance(value, (dict, list)) and key not in ['text', 'content', 'ocr_text', 'rec_texts']:
+                    texts.append(self._extract_text_from_structure(value))
+
+        return '\n'.join(filter(None, texts))
+
+    def get_version_info(self) -> dict:
+        """
+        Get version information of PaddleOCR and PaddlePaddle.
+
+        Returns:
+            Dictionary with version information.
+        """
+        info = {
+            'paddleocr_version': 'unknown',
+            'paddlepaddle_version': 'unknown',
+            'is_v3_or_higher': False
+        }
+
+        try:
+            import paddleocr as paddleocr_module
+            info['paddleocr_version'] = getattr(paddleocr_module, '__version__', 'unknown')
+            # Check version directly from module
+            version_parts = str(info['paddleocr_version']).split('.')
+            info['is_v3_or_higher'] = int(version_parts[0]) >= 3
+        except Exception:
+            pass
+
+        try:
+            import paddle
+            info['paddlepaddle_version'] = getattr(paddle, '__version__', 'unknown')
+        except Exception:
+            pass
+
+        return info
+
+    def get_model_type(self) -> str:
+        """Get current OCR model type."""
+        return self._model_type
+
+    def get_model_display_name(self) -> str:
+        """Get display name for current model."""
+        model_names = {
+            'pp-ocrv5': 'PP-OCRv5',
+            'paddleocr-vl': 'PaddleOCR-VL-1.5'
+        }
+        return model_names.get(self._model_type, self._model_type)
