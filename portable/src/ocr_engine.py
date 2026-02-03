@@ -612,17 +612,15 @@ class OCREngine:
 
             for page_result in output:
                 # Store raw result for JSON output
-                # Filter out internal objects (fields starting with _) and non-serializable objects
+                # Only filter out internal fields (starting with _) and numpy arrays
                 if hasattr(page_result, '__dict__'):
                     page_dict = {}
                     for k, v in page_result.__dict__.items():
-                        # Skip internal fields (starting with _) and numpy arrays
+                        # Skip internal/private fields (starting with _)
                         if k.startswith('_'):
                             continue
-                        if hasattr(v, 'ndim'):  # Skip numpy arrays
-                            continue
-                        # Skip non-serializable objects (writers, etc.)
-                        if hasattr(v, '__dict__') and not isinstance(v, (dict, list, str, int, float, bool, type(None))):
+                        # Skip numpy arrays
+                        if hasattr(v, 'ndim'):
                             continue
                         page_dict[k] = v
                     raw_results.append(page_dict)
@@ -713,14 +711,8 @@ class OCREngine:
                 result['markdown'] = '\n'.join(all_texts) if all_texts else ''
 
             result['json'] = raw_results
-            # For text: use extracted texts, or fall back to markdown content
-            if all_texts:
-                result['text'] = '\n'.join(all_texts)
-            elif markdown_pages:
-                # Use markdown content as plain text fallback
-                result['text'] = '\n'.join(markdown_pages)
-            else:
-                result['text'] = self._extract_text_from_structure(raw_results)
+            # For text: use extracted texts from boxes/ocr_res, or extract from JSON
+            result['text'] = '\n'.join(all_texts) if all_texts else self._extract_text_from_structure(raw_results)
 
             return result
 
