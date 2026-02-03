@@ -17,6 +17,9 @@ class AppSettings:
     # OCR Language: 'ch' (Chinese), 'en' (English), 'ch_en' (Chinese+English)
     ocr_language: str = 'ch'
 
+    # OCR Model: 'pp-ocrv5' (fast), 'paddleocr-vl' (accurate, VL model)
+    ocr_model: str = 'pp-ocrv5'
+
     # Global hotkey for screenshot
     hotkey: str = 'ctrl+shift+o'
 
@@ -49,6 +52,14 @@ class AppSettings:
     # Enable/disable hotkeys
     hotkey_enabled: bool = True
 
+    # PP-StructureV3 Document Mode Settings
+    doc_use_table_recognition: bool = True      # Table structure recognition
+    doc_use_formula_recognition: bool = False   # LaTeX formula recognition
+    doc_use_seal_recognition: bool = False      # Seal/stamp detection
+    doc_use_chart_recognition: bool = False     # Chart recognition
+    doc_use_doc_orientation: bool = False       # Document orientation fix
+    doc_use_doc_unwarping: bool = False         # Document unwarping/dewarp
+
 
 class SettingsManager:
     """
@@ -60,6 +71,12 @@ class SettingsManager:
     LANGUAGES = [
         ('ch', '简体中文'),
         ('en', 'English'),
+    ]
+
+    # Available OCR models
+    OCR_MODELS = [
+        ('pp-ocrv5', 'PP-OCRv5 (快速，适合普通场景)'),
+        ('paddleocr-vl', 'PaddleOCR-VL-1.5 (精准，适合复杂场景)'),
     ]
 
     # Available themes
@@ -89,6 +106,7 @@ class SettingsManager:
         'win+r',            # Run dialog
         'print',            # Screenshot
         'ctrl+alt+tab',     # Switch window
+        'esc',              # ESC key - used for canceling screenshot overlay
     ]
 
     def __init__(self):

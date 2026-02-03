@@ -58,6 +58,7 @@ class OCREngine:
         self._ocr_version = None
         self._vl_pipeline = None  # For PaddleOCR-VL-1.5
         self._structure_engine = None  # For PP-StructureV3 (cached)
+        self._structure_settings = None  # Cached structure settings
 
         # Lazy initialization - don't load heavy modules until needed
 
@@ -544,16 +545,23 @@ class OCREngine:
         self._ocr = None
         self._initialized = False
 
-    def recognize_document(self, image_input: Any) -> dict:
+    def recognize_document(self, image_input: Any, doc_settings: dict = None) -> str:
         """
         Perform document structure analysis using PP-StructureV3.
-        Returns markdown and JSON format output.
+        Returns markdown format output only.
 
         Args:
             image_input: Image path (str), PIL Image, or numpy array.
+            doc_settings: Optional dict with document mode settings:
+                - use_table_recognition: bool (default True)
+                - use_formula_recognition: bool (default False)
+                - use_seal_recognition: bool (default False)
+                - use_chart_recognition: bool (default False)
+                - use_doc_orientation: bool (default False)
+                - use_doc_unwarping: bool (default False)
 
         Returns:
-            Dictionary with 'markdown', 'json', and 'text' keys.
+            Markdown formatted string.
         """
         try:
             from paddleocr import PPStructureV3
@@ -562,6 +570,18 @@ class OCREngine:
                 "PP-StructureV3 not available. "
                 "Please install PaddleOCR: pip install 'paddleocr>=3.0' paddlex"
             )
+
+        # Default settings
+        settings = {
+            'use_table_recognition': True,
+            'use_formula_recognition': False,
+            'use_seal_recognition': False,
+            'use_chart_recognition': False,
+            'use_doc_orientation': False,
+            'use_doc_unwarping': False,
+        }
+        if doc_settings:
+            settings.update(doc_settings)
 
         # Convert input to path or array
         temp_path = None
@@ -580,19 +600,23 @@ class OCREngine:
             img_path = None
 
         try:
+            # Check if settings changed - need to recreate engine
+            if self._structure_engine is not None and self._structure_settings != settings:
+                self._structure_engine = None
+
             # Use cached PP-StructureV3 engine or create new one
-            # Disable unused modules to speed up loading
             if self._structure_engine is None:
                 self._structure_engine = PPStructureV3(
                     lang=self._lang,
-                    format_block_content=True,  # Enable Markdown output
-                    # Disable rarely used modules to reduce loading time
-                    use_formula_recognition=False,  # Disable formula/LaTeX
-                    use_seal_recognition=False,     # Disable seal detection
-                    use_chart_recognition=False,    # Disable chart recognition
-                    use_doc_orientation_classify=False,  # Disable orientation fix
-                    use_doc_unwarping=False,        # Disable unwarping
+                    format_block_content=True,
+                    use_table_recognition=settings['use_table_recognition'],
+                    use_formula_recognition=settings['use_formula_recognition'],
+                    use_seal_recognition=settings['use_seal_recognition'],
+                    use_chart_recognition=settings['use_chart_recognition'],
+                    use_doc_orientation_classify=settings['use_doc_orientation'],
+                    use_doc_unwarping=settings['use_doc_unwarping'],
                 )
+                self._structure_settings = settings.copy()
 
             # Run prediction - pass image path directly if available
             if img_path is not None:
@@ -603,38 +627,10 @@ class OCREngine:
                 img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
                 output = self._structure_engine.predict(img, format_block_content=True)
 
-            # Extract results
-            result = {
-                'markdown': '',
-                'json': [],
-                'text': ''
-            }
-
-            # Parse PP-StructureV3 output format
-            # output is a list of page results, each page_result is a special object
-            all_texts = []
+            # Extract markdown from results
             markdown_pages = []
-            raw_results = []
 
             for page_result in output:
-                # Store raw result for JSON output
-                # Only filter out internal fields (starting with _) and numpy arrays
-                if hasattr(page_result, '__dict__'):
-                    page_dict = {}
-                    for k, v in page_result.__dict__.items():
-                        # Skip internal/private fields (starting with _)
-                        if k.startswith('_'):
-                            continue
-                        # Skip numpy arrays
-                        if hasattr(v, 'ndim'):
-                            continue
-                        page_dict[k] = v
-                    raw_results.append(page_dict)
-                elif isinstance(page_result, dict):
-                    raw_results.append(page_result)
-
-                # Try to get markdown text from page_result
-                # PP-StructureV3 returns MarkdownResult with markdown_texts field
                 page_markdown = ''
 
                 # First try markdown_texts (direct field on page_result)
@@ -644,7 +640,6 @@ class OCREngine:
                 elif hasattr(page_result, 'markdown'):
                     md_val = page_result.markdown
                     if md_val is not None:
-                        # Check if it has markdown_texts attribute
                         if hasattr(md_val, 'markdown_texts') and md_val.markdown_texts:
                             page_markdown = str(md_val.markdown_texts)
                         elif isinstance(md_val, str):
@@ -665,62 +660,14 @@ class OCREngine:
                 if page_markdown:
                     markdown_pages.append(page_markdown)
 
-                # Extract text from boxes if available
-                boxes = None
-                if hasattr(page_result, 'boxes'):
-                    boxes = page_result.boxes
-                elif isinstance(page_result, dict) and 'boxes' in page_result:
-                    boxes = page_result.get('boxes', [])
-
-                if boxes:
-                    for box in boxes:
-                        if isinstance(box, dict):
-                            # Try various text field names
-                            for text_key in ['text', 'rec_text', 'content', 'ocr_text']:
-                                if text_key in box:
-                                    text_val = box[text_key]
-                                    if isinstance(text_val, str) and text_val.strip():
-                                        all_texts.append(text_val.strip())
-                                        break
-                                    elif isinstance(text_val, list):
-                                        for t in text_val:
-                                            if isinstance(t, str) and t.strip():
-                                                all_texts.append(t.strip())
-                                            elif isinstance(t, dict) and 'text' in t:
-                                                all_texts.append(str(t['text']).strip())
-                                        break
-
-                # Also try to get text from ocr_res if boxes didn't have text
-                if not all_texts:
-                    ocr_res = None
-                    if hasattr(page_result, 'ocr_res'):
-                        ocr_res = page_result.ocr_res
-                    elif isinstance(page_result, dict) and 'ocr_res' in page_result:
-                        ocr_res = page_result.get('ocr_res')
-
-                    if ocr_res:
-                        if hasattr(ocr_res, 'rec_texts'):
-                            all_texts.extend(ocr_res.rec_texts or [])
-                        elif isinstance(ocr_res, dict) and 'rec_texts' in ocr_res:
-                            all_texts.extend(ocr_res.get('rec_texts', []))
-
-            # Try to concatenate markdown pages if PPStructureV3 provides the method
+            # Combine pages
             if markdown_pages:
                 try:
-                    md_result = self._structure_engine.concatenate_markdown_pages(markdown_pages)
-                    # Ensure result is string
-                    result['markdown'] = str(md_result) if not isinstance(md_result, str) else md_result
+                    return str(self._structure_engine.concatenate_markdown_pages(markdown_pages))
                 except Exception:
-                    result['markdown'] = '\n\n'.join(str(p) for p in markdown_pages)
+                    return '\n\n'.join(markdown_pages)
             else:
-                # Fallback: build markdown from extracted text
-                result['markdown'] = '\n'.join(all_texts) if all_texts else ''
-
-            result['json'] = raw_results
-            # For text: use extracted texts from boxes/ocr_res, or extract from JSON
-            result['text'] = '\n'.join(all_texts) if all_texts else self._extract_text_from_structure(raw_results)
-
-            return result
+                return ''
 
         finally:
             # Cleanup temp file

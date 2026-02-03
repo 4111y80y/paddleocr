@@ -29,27 +29,26 @@ from PySide6.QtWidgets import (
     QDialogButtonBox, QLineEdit, QScrollArea, QFrame,
     QProgressBar
 )
-from PySide6.QtCore import Qt, QSize, Signal, QObject
+from PySide6.QtCore import Qt, QSize, Signal, QObject, QThread
 from PySide6.QtGui import QAction, QIcon, QPixmap, QImage, QColor
 
 
 class OCRWorker(QObject):
-    """Worker for running OCR using QTimer (no thread)."""
+    """Worker for running OCR in a background thread.
+
+    [Task 763] Changed from QTimer (main thread) to QThread (background thread)
+    to prevent UI freezing during OCR operations.
+    """
     finished = Signal(str, float, list)  # (result_text, elapsed_time, confidence_items)
     error = Signal(str)  # error message
 
-    def __init__(self, ocr_engine, image_path, parent=None):
-        super().__init__(parent)
+    def __init__(self, ocr_engine, image_path):
+        super().__init__()
         self.ocr_engine = ocr_engine
         self.image_path = image_path
 
-    def start(self):
-        """Start OCR processing using QTimer."""
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(10, self._do_ocr)
-
-    def _do_ocr(self):
-        """Execute OCR."""
+    def run(self):
+        """Execute OCR in background thread."""
         import time
         try:
             start_time = time.time()
@@ -61,6 +60,37 @@ class OCRWorker(QObject):
             elapsed = time.time() - start_time
 
             self.finished.emit(result_text, elapsed, confidence_items)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class DocumentOCRWorker(QObject):
+    """Worker for running document structure analysis using PP-StructureV3 in background thread.
+
+    [Task 763] Changed from QTimer (main thread) to QThread (background thread)
+    to prevent UI freezing during document analysis operations.
+    """
+    finished = Signal(str, float)  # (markdown_result, elapsed_time)
+    error = Signal(str)  # error message
+
+    def __init__(self, ocr_engine, image_path, doc_settings=None):
+        super().__init__()
+        self.ocr_engine = ocr_engine
+        self.image_path = image_path
+        self.doc_settings = doc_settings
+
+    def run(self):
+        """Execute document structure analysis in background thread."""
+        import time
+        try:
+            start_time = time.time()
+
+            # Use PP-StructureV3 for document analysis
+            result = self.ocr_engine.recognize_document(self.image_path, self.doc_settings)
+
+            elapsed = time.time() - start_time
+
+            self.finished.emit(result, elapsed)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -613,6 +643,116 @@ class ResultTextWidget(QWidget):
         """Clear the text and confidence items."""
         self.text_edit.clear()
         self.confidence_items = []
+
+
+class DocumentResultWidget(QWidget):
+    """Widget for displaying document structure analysis results (Markdown only)."""
+
+    copyRequested = Signal()
+    exportMarkdownRequested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.markdown_text = ""
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        # Header with export buttons
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+
+        # Title label
+        title_label = QLabel("文档解析结果 (Markdown)")
+        title_label.setStyleSheet("""
+            QLabel {
+                color: #d4d4d4;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 4px 0;
+            }
+        """)
+        header.addWidget(title_label)
+
+        header.addStretch()
+
+        # Copy button
+        self.copy_btn = QPushButton("复制")
+        self.copy_btn.setFixedSize(70, 28)
+        self.copy_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0e639c;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #1177bb;
+            }
+        """)
+        self.copy_btn.clicked.connect(self.copyRequested.emit)
+        header.addWidget(self.copy_btn)
+
+        # Export button
+        self.export_md_btn = QPushButton("导出 Markdown")
+        self.export_md_btn.setFixedSize(110, 28)
+        self.export_md_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #238636;
+                color: #ffffff;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #2ea043;
+            }
+        """)
+        self.export_md_btn.clicked.connect(self.exportMarkdownRequested.emit)
+        header.addWidget(self.export_md_btn)
+
+        layout.addLayout(header)
+
+        # Text area for displaying results
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlaceholderText("文档解析结果将显示在这里...")
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #252526;
+                color: #d4d4d4;
+                border: 1px solid #3e3e3e;
+                border-radius: 4px;
+                padding: 8px;
+                font-family: "Consolas", "Microsoft YaHei UI", monospace;
+                font-size: 13px;
+            }
+        """)
+        layout.addWidget(self.text_edit)
+
+        # Info label
+        self.info_label = QLabel("使用 PP-StructureV3 进行文档结构分析")
+        self.info_label.setStyleSheet("color: #6e6e6e; font-size: 11px;")
+        layout.addWidget(self.info_label)
+
+    def set_markdown(self, markdown: str):
+        """Set the markdown text."""
+        self.markdown_text = markdown
+        self.text_edit.setPlainText(markdown)
+
+    def get_markdown(self) -> str:
+        """Get the markdown text."""
+        return self.markdown_text
+
+    def clear(self):
+        """Clear the results."""
+        self.text_edit.clear()
+        self.markdown_text = ""
 
 
 class HistoryDialog(QDialog):
@@ -1249,7 +1389,7 @@ class SettingsDialog(QDialog):
         """Setup dialog UI."""
         self.setWindowTitle("设置")
         self.setMinimumSize(450, 400)
-        self.resize(520, 480)
+        self.resize(520, 620)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(16)
@@ -1287,6 +1427,52 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(hotkey_group)
 
+        # OCR Model Section
+        model_group = QGroupBox("OCR 模型")
+        model_layout = QVBoxLayout(model_group)
+        model_layout.setSpacing(8)
+
+        model_info_layout = QHBoxLayout()
+        model_info_layout.addWidget(QLabel("选择模型:"))
+        self.model_combo = QComboBox()
+        for key, name in SettingsManager.OCR_MODELS:
+            self.model_combo.addItem(name, key)
+        self.model_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                border: 1px solid #3e3e3e;
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-width: 200px;
+            }
+            QComboBox:hover {
+                border-color: #007acc;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2d2d2d;
+                color: #d4d4d4;
+                selection-background-color: #0e639c;
+            }
+        """)
+        model_info_layout.addWidget(self.model_combo)
+        model_info_layout.addStretch()
+        model_layout.addLayout(model_info_layout)
+
+        # Model description
+        self.model_desc_label = QLabel(
+            "PP-OCRv5: 快速识别，适合普通场景\n"
+            "PaddleOCR-VL-1.5: 精准识别，适合复杂场景（印章、倾斜、弯曲、复杂光照）"
+        )
+        self.model_desc_label.setStyleSheet("color: #808080; font-size: 11px;")
+        self.model_desc_label.setWordWrap(True)
+        model_layout.addWidget(self.model_desc_label)
+
+        layout.addWidget(model_group)
+
         # Behavior Section
         behavior_group = QGroupBox("行为")
         behavior_layout = QVBoxLayout(behavior_group)
@@ -1308,6 +1494,49 @@ class SettingsDialog(QDialog):
         behavior_layout.addWidget(self.minimize_to_tray_check)
 
         layout.addWidget(behavior_group)
+
+        # Document Mode Section
+        doc_group = QGroupBox("文档模式 (PP-StructureV3)")
+        doc_layout = QVBoxLayout(doc_group)
+        doc_layout.setSpacing(8)
+
+        # Document mode options
+        self.doc_table_check = QPushButton("表格识别")
+        self.doc_table_check.setCheckable(True)
+        self.doc_table_check.setStyleSheet(self._get_toggle_style())
+        doc_layout.addWidget(self.doc_table_check)
+
+        self.doc_formula_check = QPushButton("公式识别 (LaTeX)")
+        self.doc_formula_check.setCheckable(True)
+        self.doc_formula_check.setStyleSheet(self._get_toggle_style())
+        doc_layout.addWidget(self.doc_formula_check)
+
+        self.doc_seal_check = QPushButton("印章识别")
+        self.doc_seal_check.setCheckable(True)
+        self.doc_seal_check.setStyleSheet(self._get_toggle_style())
+        doc_layout.addWidget(self.doc_seal_check)
+
+        self.doc_chart_check = QPushButton("图表识别")
+        self.doc_chart_check.setCheckable(True)
+        self.doc_chart_check.setStyleSheet(self._get_toggle_style())
+        doc_layout.addWidget(self.doc_chart_check)
+
+        self.doc_orientation_check = QPushButton("文档方向校正")
+        self.doc_orientation_check.setCheckable(True)
+        self.doc_orientation_check.setStyleSheet(self._get_toggle_style())
+        doc_layout.addWidget(self.doc_orientation_check)
+
+        self.doc_unwarping_check = QPushButton("文档弯曲矫正")
+        self.doc_unwarping_check.setCheckable(True)
+        self.doc_unwarping_check.setStyleSheet(self._get_toggle_style())
+        doc_layout.addWidget(self.doc_unwarping_check)
+
+        # Info label
+        doc_info_label = QLabel("启用更多功能会增加加载时间")
+        doc_info_label.setStyleSheet("color: #808080; font-size: 11px;")
+        doc_layout.addWidget(doc_info_label)
+
+        layout.addWidget(doc_group)
 
         layout.addStretch()
 
@@ -1362,10 +1591,23 @@ class SettingsDialog(QDialog):
         hotkey = settings.hotkey
         self.hotkey_label.setText(self.settings_manager.get_hotkey_display_name(hotkey))
 
+        # OCR Model
+        model_index = self.model_combo.findData(settings.ocr_model)
+        if model_index >= 0:
+            self.model_combo.setCurrentIndex(model_index)
+
         # Behavior
         self.auto_copy_check.setChecked(settings.auto_copy)
         self.show_notification_check.setChecked(settings.show_notification)
         self.minimize_to_tray_check.setChecked(settings.minimize_to_tray)
+
+        # Document Mode
+        self.doc_table_check.setChecked(settings.doc_use_table_recognition)
+        self.doc_formula_check.setChecked(settings.doc_use_formula_recognition)
+        self.doc_seal_check.setChecked(settings.doc_use_seal_recognition)
+        self.doc_chart_check.setChecked(settings.doc_use_chart_recognition)
+        self.doc_orientation_check.setChecked(settings.doc_use_doc_orientation)
+        self.doc_unwarping_check.setChecked(settings.doc_use_doc_unwarping)
 
     def _open_hotkey_settings(self):
         """Open the advanced hotkey settings dialog."""
@@ -1386,10 +1628,21 @@ class SettingsDialog(QDialog):
         """Save settings and close dialog."""
         settings = self.settings_manager.settings
 
+        # OCR Model
+        settings.ocr_model = self.model_combo.currentData()
+
         # Behavior
         settings.auto_copy = self.auto_copy_check.isChecked()
         settings.show_notification = self.show_notification_check.isChecked()
         settings.minimize_to_tray = self.minimize_to_tray_check.isChecked()
+
+        # Document Mode
+        settings.doc_use_table_recognition = self.doc_table_check.isChecked()
+        settings.doc_use_formula_recognition = self.doc_formula_check.isChecked()
+        settings.doc_use_seal_recognition = self.doc_seal_check.isChecked()
+        settings.doc_use_chart_recognition = self.doc_chart_check.isChecked()
+        settings.doc_use_doc_orientation = self.doc_orientation_check.isChecked()
+        settings.doc_use_doc_unwarping = self.doc_unwarping_check.isChecked()
 
         # Save to file
         self.settings_manager.save()
@@ -1422,15 +1675,20 @@ class MainWindow(QMainWindow):
         self.ocr_engine = None
         self._ocr_thread = None
         self._ocr_worker = None
+        self._doc_worker = None
         self._temp_image_path = None
         self._current_pixmap = None  # Store current screenshot for history
         self.history_manager = HistoryManager()
         self.settings_manager = SettingsManager()
         self._ocr_initializing = False  # Flag to prevent concurrent initialization
+        self._ocr_mode = "text"  # "text" or "document"
+        self.vision_server = None  # [Task 687] Vision server instance
         self.setup_ui()
         # OCR engine is now lazily initialized on first use
         self._lazy_init_ocr = True
         self.setup_device_combo()
+        # [Task 687] Start vision server for self-testing
+        self._start_vision_server()
 
     def setup_ui(self):
         """Setup the user interface."""
@@ -1466,11 +1724,23 @@ class MainWindow(QMainWindow):
         self.preview_widget = ImagePreviewWidget()
         splitter.addWidget(self.preview_widget)
 
-        # Right: OCR result
+        # Right: OCR result (stacked widget for different modes)
+        from PySide6.QtWidgets import QStackedWidget
+        self.result_stack = QStackedWidget()
+
+        # Text mode widget
         self.result_widget = ResultTextWidget()
         self.result_widget.copyRequested.connect(self.copy_result)
         self.result_widget.saveRequested.connect(self.save_result_to_file)
-        splitter.addWidget(self.result_widget)
+        self.result_stack.addWidget(self.result_widget)
+
+        # Document mode widget
+        self.document_widget = DocumentResultWidget()
+        self.document_widget.copyRequested.connect(self.copy_markdown)
+        self.document_widget.exportMarkdownRequested.connect(self.export_markdown)
+        self.result_stack.addWidget(self.document_widget)
+
+        splitter.addWidget(self.result_stack)
 
         # Set stretch factors for proportional resizing (1:1 ratio)
         splitter.setStretchFactor(0, 1)
@@ -1512,6 +1782,63 @@ class MainWindow(QMainWindow):
         self.action_open = QAction("打开图片", self)
         self.action_open.triggered.connect(self.open_image)
         toolbar.addAction(self.action_open)
+
+        toolbar.addSeparator()
+
+        # Mode switch buttons
+        self.text_mode_btn = QPushButton("文字模式")
+        self.text_mode_btn.setCheckable(True)
+        self.text_mode_btn.setChecked(True)
+        self.text_mode_btn.setFixedWidth(90)
+        self.text_mode_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0e639c;
+                color: #ffffff;
+                border: 1px solid #1177bb;
+                border-radius: 3px;
+                padding: 4px 12px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton:checked {
+                background-color: #0e639c;
+                border-color: #1177bb;
+            }
+            QPushButton:!checked {
+                background-color: #3c3c3c;
+                border-color: #555555;
+                font-weight: normal;
+            }
+            QPushButton:hover {
+                border-color: #007acc;
+            }
+        """)
+        self.text_mode_btn.clicked.connect(lambda: self._set_ocr_mode("text"))
+        toolbar.addWidget(self.text_mode_btn)
+
+        self.doc_mode_btn = QPushButton("文档模式")
+        self.doc_mode_btn.setCheckable(True)
+        self.doc_mode_btn.setFixedWidth(90)
+        self.doc_mode_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 4px 12px;
+                font-size: 13px;
+            }
+            QPushButton:checked {
+                background-color: #0e639c;
+                border-color: #1177bb;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                border-color: #007acc;
+            }
+        """)
+        self.doc_mode_btn.clicked.connect(lambda: self._set_ocr_mode("document"))
+        toolbar.addWidget(self.doc_mode_btn)
 
         toolbar.addSeparator()
 
@@ -1563,6 +1890,86 @@ class MainWindow(QMainWindow):
         # Always use CPU, no device selection needed
         self.time_label.setText("就绪 - OCR引擎将在首次使用时初始化")
 
+    def _start_vision_server(self):
+        """[Task 687] Start the vision server for self-testing."""
+        try:
+            from vision_server import create_vision_server
+            import asyncio
+
+            self.vision_server = create_vision_server(self)
+
+            # Start server in background using QTimer
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._run_vision_server)
+
+            logger.info("[MainWindow] Vision server scheduled to start")
+        except Exception as e:
+            logger.warning(f"[MainWindow] Failed to start vision server: {e}")
+
+    def _run_vision_server(self):
+        """[Task 687] Run vision server async loop in background."""
+        import asyncio
+        import threading
+
+        def run_server():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.vision_server.start())
+                loop.run_forever()
+            except Exception as e:
+                logger.error(f"[VisionServer] Server error: {e}")
+
+        # Run in daemon thread
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        logger.info("[MainWindow] Vision server started on ws://127.0.0.1:18900")
+
+    def _stop_vision_server(self):
+        """[Task 687] Stop the vision server."""
+        if self.vision_server:
+            try:
+                import asyncio
+                asyncio.create_task(self.vision_server.stop())
+                logger.info("[MainWindow] Vision server stopped")
+            except Exception as e:
+                logger.warning(f"[MainWindow] Error stopping vision server: {e}")
+
+    # [Task 687] Vision server action handlers
+    def on_screenshot(self):
+        """Handler for screenshot action."""
+        self.start_screenshot()
+
+    def on_document_analysis(self):
+        """Handler for document analysis action."""
+        self._set_ocr_mode("document")
+        self.start_screenshot()
+
+    def on_batch_process(self):
+        """Handler for batch process action."""
+        self.show_batch_dialog()
+
+    def on_show_history(self):
+        """Handler for show history action."""
+        self.show_history()
+
+    def on_settings(self):
+        """Handler for settings action."""
+        self.show_settings()
+
+    def on_clear_result(self):
+        """Handler for clear result action."""
+        self.result_widget.clear()
+        self.preview_widget.clear()
+
+    def on_copy_result(self):
+        """Handler for copy result action."""
+        self.copy_result()
+
+    def on_save_result(self):
+        """Handler for save result action."""
+        self.save_result_to_file()
+
     def ensure_ocr_engine(self):
         """Ensure OCR engine is initialized (lazy loading)."""
         settings = self.settings_manager.settings
@@ -1592,11 +1999,21 @@ class MainWindow(QMainWindow):
 
             self.ocr_engine = OCREngine(
                 device_id=device_id,
-                lang=settings.ocr_language
+                lang=settings.ocr_language,
+                model_type=settings.ocr_model
             )
 
+            # Get version info
+            version_info = self.ocr_engine.get_version_info()
+            model_type = self.ocr_engine.get_model_display_name()
+            version_text = ""
+            if version_info['is_v3_or_higher']:
+                version_text = f" (PaddleOCR 3.0 + {model_type})"
+            else:
+                version_text = f" (PaddleOCR {version_info.get('paddleocr_version', '2.x')} + {model_type})"
+
             # Update status
-            self.time_label.setText("OCR 引擎已就绪")
+            self.time_label.setText(f"OCR 引擎已就绪{version_text}")
             return True
 
         except Exception as e:
@@ -1613,6 +2030,134 @@ class MainWindow(QMainWindow):
     def setup_ocr_engine(self):
         """Initialize the OCR engine (deprecated, use ensure_ocr_engine)."""
         return self.ensure_ocr_engine()
+
+    def _set_ocr_mode(self, mode: str):
+        """Switch between text and document OCR mode."""
+        if mode == self._ocr_mode:
+            return
+
+        self._ocr_mode = mode
+
+        if mode == "text":
+            self.text_mode_btn.setChecked(True)
+            self.doc_mode_btn.setChecked(False)
+            self.result_stack.setCurrentIndex(0)
+            self.time_label.setText("已切换到文字模式")
+        else:  # document mode
+            self.text_mode_btn.setChecked(False)
+            self.doc_mode_btn.setChecked(True)
+            self.result_stack.setCurrentIndex(1)
+            self.time_label.setText("已切换到文档模式 (PP-StructureV3)")
+
+    def _run_document_analysis_async(self, image_path):
+        """Run document structure analysis in background thread to avoid UI freeze.
+
+        [Task 763] Changed to use QThread for background document analysis.
+        """
+        # Cleanup previous worker if exists
+        self._cleanup_ocr_thread()
+
+        # Disable UI during processing
+        self.action_screenshot.setEnabled(False)
+        self.action_open.setEnabled(False)
+        self.time_label.setText("文档分析中...")
+        self.statusbar.repaint()
+
+        # Get document settings from settings manager
+        settings = self.settings_manager.settings
+        doc_settings = {
+            'use_table_recognition': settings.doc_use_table_recognition,
+            'use_formula_recognition': settings.doc_use_formula_recognition,
+            'use_seal_recognition': settings.doc_use_seal_recognition,
+            'use_chart_recognition': settings.doc_use_chart_recognition,
+            'use_doc_orientation': settings.doc_use_doc_orientation,
+            'use_doc_unwarping': settings.doc_use_doc_unwarping,
+        }
+
+        # Create thread and worker
+        self._ocr_thread = QThread()
+        self._doc_worker = DocumentOCRWorker(self.ocr_engine, image_path, doc_settings)
+        self._doc_worker.moveToThread(self._ocr_thread)
+
+        # Connect signals
+        self._ocr_thread.started.connect(self._doc_worker.run)
+        self._doc_worker.finished.connect(self._on_document_analysis_finished)
+        self._doc_worker.finished.connect(self._ocr_thread.quit)
+        self._doc_worker.error.connect(self._on_document_analysis_error)
+        self._doc_worker.error.connect(self._ocr_thread.quit)
+
+        # Start the thread
+        self._ocr_thread.start()
+
+    def _on_document_analysis_finished(self, result: str, elapsed: float):
+        """Handle document analysis completion."""
+        # Display result in document widget (markdown string)
+        self.document_widget.set_markdown(result)
+
+        self.time_label.setText(f"文档分析完成，耗时 {elapsed:.2f} 秒")
+
+        # Save to history (use markdown as text)
+        if result.strip():
+            self.history_manager.add_record(
+                text=result,
+                image=self._current_pixmap,
+                elapsed_time=elapsed
+            )
+
+        # Re-enable UI
+        self._enable_ui()
+
+        # Cleanup temp file
+        self._cleanup_temp_file()
+
+    def _on_document_analysis_error(self, error_msg: str):
+        """Handle document analysis error."""
+        QMessageBox.critical(
+            self,
+            "错误",
+            f"文档分析失败:\n{error_msg}"
+        )
+        self.time_label.setText("错误")
+
+        # Re-enable UI
+        self._enable_ui()
+
+        # Cleanup temp file
+        self._cleanup_temp_file()
+
+    def copy_markdown(self):
+        """Copy markdown result to clipboard."""
+        from PySide6.QtWidgets import QApplication
+
+        text = self.document_widget.get_markdown()
+        if text:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            self.time_label.setText("Markdown 已复制到剪贴板！")
+
+    def export_markdown(self):
+        """Export markdown result to file."""
+        from PySide6.QtWidgets import QFileDialog
+
+        text = self.document_widget.get_markdown()
+        if not text:
+            QMessageBox.warning(self, "警告", "没有可导出的 Markdown 内容")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 Markdown",
+            "document_result.md",
+            "Markdown 文件 (*.md);;所有文件 (*)"
+        )
+
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                self.time_label.setText(f"Markdown 已导出到: {file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "导出失败", f"导出文件失败:\n{str(e)}")
 
     def start_screenshot(self):
         """Start screenshot capture."""
@@ -1677,8 +2222,11 @@ class MainWindow(QMainWindow):
             self._temp_image_path = os.path.join(temp_dir, "screenocr_temp.png")
             pixmap.save(self._temp_image_path, "PNG")
 
-            # Run OCR asynchronously
-            self._run_ocr_async(self._temp_image_path)
+            # Run OCR or document analysis based on current mode
+            if self._ocr_mode == "document":
+                self._run_document_analysis_async(self._temp_image_path)
+            else:
+                self._run_ocr_async(self._temp_image_path)
 
         except Exception as e:
             QMessageBox.critical(
@@ -1689,7 +2237,10 @@ class MainWindow(QMainWindow):
             self.time_label.setText("错误")
 
     def _run_ocr_async(self, image_path):
-        """Run OCR using QTimer to avoid UI freeze."""
+        """Run OCR in background thread to avoid UI freeze.
+
+        [Task 763] Changed to use QThread for background OCR processing.
+        """
         # Cleanup previous worker if exists
         self._cleanup_ocr_thread()
 
@@ -1699,11 +2250,20 @@ class MainWindow(QMainWindow):
         self.time_label.setText("处理中...")
         self.statusbar.repaint()
 
-        # Create worker (no thread needed)
-        self._ocr_worker = OCRWorker(self.ocr_engine, image_path, parent=self)
+        # Create thread and worker
+        self._ocr_thread = QThread()
+        self._ocr_worker = OCRWorker(self.ocr_engine, image_path)
+        self._ocr_worker.moveToThread(self._ocr_thread)
+
+        # Connect signals
+        self._ocr_thread.started.connect(self._ocr_worker.run)
         self._ocr_worker.finished.connect(self._on_ocr_finished)
+        self._ocr_worker.finished.connect(self._ocr_thread.quit)
         self._ocr_worker.error.connect(self._on_ocr_error)
-        self._ocr_worker.start()
+        self._ocr_worker.error.connect(self._ocr_thread.quit)
+
+        # Start the thread
+        self._ocr_thread.start()
 
     def _on_ocr_finished(self, result_text, elapsed, confidence_items):
         """Handle OCR completion."""
@@ -1747,8 +2307,17 @@ class MainWindow(QMainWindow):
         self.action_open.setEnabled(True)
 
     def _cleanup_ocr_thread(self):
-        """Cleanup OCR worker resources (no thread used)."""
+        """Cleanup OCR thread and worker resources.
+
+        [Task 763] Updated to properly cleanup QThread instances.
+        """
+        if self._ocr_thread is not None:
+            if self._ocr_thread.isRunning():
+                self._ocr_thread.quit()
+                self._ocr_thread.wait(3000)  # Wait up to 3 seconds
+            self._ocr_thread = None
         self._ocr_worker = None
+        self._doc_worker = None
 
     def _cleanup_temp_file(self):
         """Cleanup temporary image file."""
@@ -1799,8 +2368,11 @@ class MainWindow(QMainWindow):
             image = Image.open(image_path)
             self.preview_widget.set_image(image)
 
-            # Run OCR asynchronously
-            self._run_ocr_async(image_path)
+            # Run OCR or document analysis based on current mode
+            if self._ocr_mode == "document":
+                self._run_document_analysis_async(image_path)
+            else:
+                self._run_ocr_async(image_path)
 
         except Exception as e:
             QMessageBox.critical(
@@ -1867,14 +2439,23 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _on_settings_changed(self):
-        """Handle settings changed - reload OCR engine if language changed."""
+        """Handle settings changed - reload OCR engine if language or model changed."""
         settings = self.settings_manager.settings
-        # Update OCR engine language setting if engine exists
+        # Update OCR engine settings if engine exists
         if self.ocr_engine:
             old_lang = self.ocr_engine._lang
+            old_model = self.ocr_engine._model_type
             self.ocr_engine.set_language(settings.ocr_language)
+            self.ocr_engine.set_model_type(settings.ocr_model)
+
+            changes = []
             if old_lang != settings.ocr_language:
-                self.time_label.setText(f"语言已更改: {old_lang} -> {settings.ocr_language}，OCR引擎将在下次使用时重新初始化")
+                changes.append(f"语言: {old_lang} -> {settings.ocr_language}")
+            if old_model != settings.ocr_model:
+                changes.append(f"模型: {old_model} -> {settings.ocr_model}")
+
+            if changes:
+                self.time_label.setText(f"已更改: {', '.join(changes)}，OCR引擎将在下次使用时重新初始化")
             else:
                 self.time_label.setText("设置已保存")
         else:
@@ -1894,3 +2475,5 @@ class MainWindow(QMainWindow):
         # Cleanup OCR engine
         if self.ocr_engine:
             self.ocr_engine.cleanup()
+        # [Task 687] Stop vision server
+        self._stop_vision_server()
