@@ -1384,6 +1384,7 @@ class SettingsDialog(QDialog):
         self.settings_manager = settings_manager
         self.setup_ui()
         self.load_settings()
+        self._center_on_parent()
 
     def setup_ui(self):
         """Setup dialog UI."""
@@ -1662,6 +1663,15 @@ class SettingsDialog(QDialog):
         if reply == QMessageBox.StandardButton.Yes:
             self.settings_manager.reset_to_defaults()
             self.load_settings()
+
+    def _center_on_parent(self):
+        """Center the dialog on its parent window."""
+        if self.parent():
+            parent_geo = self.parent().geometry()
+            self.move(
+                parent_geo.center().x() - self.width() // 2,
+                parent_geo.center().y() - self.height() // 2
+            )
 
 
 class MainWindow(QMainWindow):
