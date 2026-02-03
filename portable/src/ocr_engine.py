@@ -581,21 +581,21 @@ class OCREngine:
 
         try:
             # Use cached PP-StructureV3 engine or create new one
+            # Use format_block_content=True to get automatic Markdown formatting
             if self._structure_engine is None:
-                self._structure_engine = PPStructureV3(lang=self._lang)
+                self._structure_engine = PPStructureV3(
+                    lang=self._lang,
+                    format_block_content=True  # Enable Markdown output
+                )
 
-            # Run prediction
+            # Run prediction - pass image path directly if available
             if img_path is not None:
-                # Use cv2 to read image
-                import cv2
-                img = cv2.imread(img_path)
+                output = self._structure_engine.predict(img_path, format_block_content=True)
             else:
+                # For numpy array, need to use cv2 format (BGR)
                 import cv2
-                # Convert RGB to BGR for OpenCV
                 img = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-
-            # Use predict() method for PPStructureV3 (PaddleOCR 3.x API)
-            output = self._structure_engine.predict(img)
+                output = self._structure_engine.predict(img, format_block_content=True)
 
             # Extract results
             result = {
@@ -605,61 +605,85 @@ class OCREngine:
             }
 
             # Parse PP-StructureV3 output format
-            # output is a generator/list of prediction results
-            all_regions = []
-            markdown_lines = []
+            # output is a list of page results, each page_result is a special object
+            all_texts = []
+            markdown_pages = []
+            raw_results = []
 
             for page_result in output:
-                # Each page_result may have different structure
-                if hasattr(page_result, '__iter__') and not isinstance(page_result, (str, dict)):
-                    # It's iterable (like a list)
-                    for item in page_result:
-                        all_regions.append(item)
+                # Store raw result for JSON output
+                if hasattr(page_result, '__dict__'):
+                    # Convert object to dict, excluding numpy arrays
+                    page_dict = {}
+                    for k, v in page_result.__dict__.items():
+                        if hasattr(v, 'ndim'):  # Skip numpy arrays
+                            continue
+                        page_dict[k] = v
+                    raw_results.append(page_dict)
                 elif isinstance(page_result, dict):
-                    all_regions.append(page_result)
-                else:
-                    # Try to access as object attributes
-                    if hasattr(page_result, 'keys'):
-                        all_regions.append(dict(page_result))
+                    raw_results.append(page_result)
 
-            # Process each region
-            for region in all_regions:
-                if isinstance(region, dict):
-                    region_type = region.get('type', region.get('label', 'text'))
+                # Try to get markdown from page_result
+                page_markdown = ''
+                if hasattr(page_result, 'markdown'):
+                    page_markdown = page_result.markdown or ''
+                elif isinstance(page_result, dict) and 'markdown' in page_result:
+                    page_markdown = page_result.get('markdown', '')
 
-                    # Try different keys for text content
-                    region_text = ''
-                    for key in ['text', 'rec_texts', 'res', 'content']:
-                        if key in region:
-                            val = region[key]
-                            if isinstance(val, str):
-                                region_text = val
-                                break
-                            elif isinstance(val, list):
-                                # Join list of texts
-                                text_parts = []
-                                for item in val:
-                                    if isinstance(item, str):
-                                        text_parts.append(item)
-                                    elif isinstance(item, dict) and 'text' in item:
-                                        text_parts.append(item['text'])
-                                region_text = ' '.join(text_parts)
-                                break
+                if page_markdown:
+                    markdown_pages.append(page_markdown)
 
-                    if region_text:
-                        # Format based on region type
-                        if region_type in ['title', 'header']:
-                            markdown_lines.append(f"# {region_text}\n")
-                        elif region_type in ['table']:
-                            markdown_lines.append(f"[Table]\n{region_text}\n")
-                        elif region_type in ['figure', 'image']:
-                            markdown_lines.append(f"[Figure]\n")
-                        else:
-                            markdown_lines.append(f"{region_text}\n")
+                # Extract text from boxes if available
+                boxes = None
+                if hasattr(page_result, 'boxes'):
+                    boxes = page_result.boxes
+                elif isinstance(page_result, dict) and 'boxes' in page_result:
+                    boxes = page_result.get('boxes', [])
 
-            result['json'] = all_regions
-            result['markdown'] = '\n'.join(markdown_lines) if markdown_lines else ''
-            result['text'] = self._extract_text_from_structure(all_regions)
+                if boxes:
+                    for box in boxes:
+                        if isinstance(box, dict):
+                            # Try various text field names
+                            for text_key in ['text', 'rec_text', 'content', 'ocr_text']:
+                                if text_key in box:
+                                    text_val = box[text_key]
+                                    if isinstance(text_val, str) and text_val.strip():
+                                        all_texts.append(text_val.strip())
+                                        break
+                                    elif isinstance(text_val, list):
+                                        for t in text_val:
+                                            if isinstance(t, str) and t.strip():
+                                                all_texts.append(t.strip())
+                                            elif isinstance(t, dict) and 'text' in t:
+                                                all_texts.append(str(t['text']).strip())
+                                        break
+
+                # Also try to get text from ocr_res if boxes didn't have text
+                if not all_texts:
+                    ocr_res = None
+                    if hasattr(page_result, 'ocr_res'):
+                        ocr_res = page_result.ocr_res
+                    elif isinstance(page_result, dict) and 'ocr_res' in page_result:
+                        ocr_res = page_result.get('ocr_res')
+
+                    if ocr_res:
+                        if hasattr(ocr_res, 'rec_texts'):
+                            all_texts.extend(ocr_res.rec_texts or [])
+                        elif isinstance(ocr_res, dict) and 'rec_texts' in ocr_res:
+                            all_texts.extend(ocr_res.get('rec_texts', []))
+
+            # Try to concatenate markdown pages if PPStructureV3 provides the method
+            if markdown_pages:
+                try:
+                    result['markdown'] = self._structure_engine.concatenate_markdown_pages(markdown_pages)
+                except Exception:
+                    result['markdown'] = '\n\n'.join(markdown_pages)
+            else:
+                # Fallback: build markdown from extracted text
+                result['markdown'] = '\n'.join(all_texts) if all_texts else ''
+
+            result['json'] = raw_results
+            result['text'] = '\n'.join(all_texts) if all_texts else self._extract_text_from_structure(raw_results)
 
             return result
 
