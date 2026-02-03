@@ -612,28 +612,51 @@ class OCREngine:
 
             for page_result in output:
                 # Store raw result for JSON output
+                # Filter out internal objects (fields starting with _) and non-serializable objects
                 if hasattr(page_result, '__dict__'):
-                    # Convert object to dict, excluding numpy arrays
                     page_dict = {}
                     for k, v in page_result.__dict__.items():
+                        # Skip internal fields (starting with _) and numpy arrays
+                        if k.startswith('_'):
+                            continue
                         if hasattr(v, 'ndim'):  # Skip numpy arrays
+                            continue
+                        # Skip non-serializable objects (writers, etc.)
+                        if hasattr(v, '__dict__') and not isinstance(v, (dict, list, str, int, float, bool, type(None))):
                             continue
                         page_dict[k] = v
                     raw_results.append(page_dict)
                 elif isinstance(page_result, dict):
                     raw_results.append(page_result)
 
-                # Try to get markdown from page_result
+                # Try to get markdown text from page_result
+                # PP-StructureV3 returns MarkdownResult with markdown_texts field
                 page_markdown = ''
-                if hasattr(page_result, 'markdown'):
+
+                # First try markdown_texts (direct field on page_result)
+                if hasattr(page_result, 'markdown_texts') and page_result.markdown_texts:
+                    page_markdown = str(page_result.markdown_texts)
+                # Then try markdown.markdown_texts if markdown is an object
+                elif hasattr(page_result, 'markdown'):
                     md_val = page_result.markdown
-                    # Convert MarkdownResult or other objects to string
                     if md_val is not None:
-                        page_markdown = str(md_val) if not isinstance(md_val, str) else md_val
-                elif isinstance(page_result, dict) and 'markdown' in page_result:
-                    md_val = page_result.get('markdown', '')
-                    if md_val is not None:
-                        page_markdown = str(md_val) if not isinstance(md_val, str) else md_val
+                        # Check if it has markdown_texts attribute
+                        if hasattr(md_val, 'markdown_texts') and md_val.markdown_texts:
+                            page_markdown = str(md_val.markdown_texts)
+                        elif isinstance(md_val, str):
+                            page_markdown = md_val
+                        elif isinstance(md_val, dict) and 'markdown_texts' in md_val:
+                            page_markdown = str(md_val['markdown_texts'])
+                # Dict access
+                elif isinstance(page_result, dict):
+                    if 'markdown_texts' in page_result:
+                        page_markdown = str(page_result['markdown_texts'])
+                    elif 'markdown' in page_result:
+                        md_val = page_result['markdown']
+                        if isinstance(md_val, dict) and 'markdown_texts' in md_val:
+                            page_markdown = str(md_val['markdown_texts'])
+                        elif isinstance(md_val, str):
+                            page_markdown = md_val
 
                 if page_markdown:
                     markdown_pages.append(page_markdown)
@@ -690,7 +713,14 @@ class OCREngine:
                 result['markdown'] = '\n'.join(all_texts) if all_texts else ''
 
             result['json'] = raw_results
-            result['text'] = '\n'.join(all_texts) if all_texts else self._extract_text_from_structure(raw_results)
+            # For text: use extracted texts, or fall back to markdown content
+            if all_texts:
+                result['text'] = '\n'.join(all_texts)
+            elif markdown_pages:
+                # Use markdown content as plain text fallback
+                result['text'] = '\n'.join(markdown_pages)
+            else:
+                result['text'] = self._extract_text_from_structure(raw_results)
 
             return result
 
